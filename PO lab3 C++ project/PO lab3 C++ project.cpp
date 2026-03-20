@@ -30,7 +30,7 @@ public:
         return stop;
     }
 
-    template<class F, class... Args> void enqueue(F&& f, Args&&... args);
+    template<class F, class... Args> void add_task(F&& f, Args&&... args);
 };
 
 void ThreadPool::worker_routine()
@@ -83,6 +83,24 @@ ThreadPool::~ThreadPool()
 			worker.join();
         }
     }
+}
+
+template<class F, class... Args> void add_task(F&& f, Args&&... args)
+{
+    auto task = bind(forward<F>(f), forward<Args>(args)...);
+
+    {
+        unique_lock<mutex> lock(queue_mutex);
+
+        if (stop)
+        {
+            throw runtime_error("Adding task to ThreadPool has been stopped");
+        }
+
+        task.emplace(task);
+    }
+
+	cv.notify_one();
 }
 
 int main()
