@@ -10,6 +10,7 @@
 #include <format>
 #include <sstream>
 #include <atomic>
+#include <algorithm>
 
 using namespace std;
 
@@ -43,6 +44,9 @@ private:
     atomic<long long> total_wait_time_sec{ 0 };
     atomic<int> wait_count{ 0 };
 
+    atomic<long long> queue_size_sum{ 0 };
+    atomic<int> queue_count{ 0 };
+
     void worker_routine();
 public:
 	ThreadPool(size_t num_threads = 8);
@@ -63,6 +67,7 @@ public:
         }
 
         cv.notify_all();
+        cv.notify_all();
     }
 
     void stop_immediately()
@@ -71,7 +76,7 @@ public:
             unique_lock<mutex> lock(queue_mutex);
             stop = true;
 
-            active_tasks -= tasks.size();
+            active_tasks = max(0, active_tasks - static_cast<int>(tasks.size()));
 
             queue<function<void()>> empty_queue;
             swap(tasks, empty_queue);
@@ -90,6 +95,13 @@ public:
         if (wait_count == 0) return 0.0;
 
         return static_cast<double>(total_wait_time_sec) / wait_count / 1000.0;
+    }
+
+    double get_avg_queue_size()
+    {
+        if (queue_count == 0) return 0.0;
+
+        return (double)queue_size_sum / queue_count;
     }
 
     void wait_all()
@@ -190,6 +202,9 @@ template<class F, class... Args> void ThreadPool::add_task(F&& f, Args&&... args
 
         tasks.push(function<void()>(task));
         active_tasks++;
+
+        queue_size_sum += tasks.size();
+        queue_count++;
     }
 
 	cv.notify_one();
@@ -205,8 +220,8 @@ void work(int task_id)
         cout << format("[{:%H:%M:%S}] [Thread {}] has got a task {}\n", now, get_thread_id(), task_id);
     }
 
-    random_device rd;
-    mt19937 gen(rd());
+    thread_local random_device rd;
+    thread_local mt19937 gen(rd());
     uniform_int_distribution<> dist(10, 16);
     int sleep_time = dist(gen);
 
@@ -224,7 +239,7 @@ void work(int task_id)
     }
 }
 
-void task_producer(ThreadPool& pool, int producer_id, int start_task_id, int count)
+void task_producer(ThreadPool& pool, int start_task_id, int count)
 {
     for (int i = 0; i < count; i++)
     {
@@ -248,9 +263,9 @@ int main()
 {
     ThreadPool pool(8);
     
-    thread producer1(task_producer, ref(pool), 1, 10, 4);
-    thread producer2(task_producer, ref(pool), 2, 20, 4);
-    thread producer3(task_producer, ref(pool), 3, 30, 4);
+    thread producer1(task_producer, ref(pool), 10, 4);
+    thread producer2(task_producer, ref(pool), 20, 4);
+    thread producer3(task_producer, ref(pool), 30, 4);
 
     producer1.join();
     producer2.join();
@@ -262,7 +277,7 @@ int main()
 
     pool.pause();
     now = chrono::system_clock::now();
-    cout << format("\n[{:%H:%M:%S}] Pool is paused, no new tasks are being accepted...\n\n", now);
+    cout << format("\n[{:%H:%M:%S}] Pool is paused, execution is suspended...\n\n", now);
     this_thread::sleep_for(chrono::seconds(20));
 
     now = chrono::system_clock::now();
@@ -283,6 +298,7 @@ int main()
     }
 
     cout << format("Average task completion time: {:.2f} seconds\n", avg_task_time);
+    cout << format("Average queue length: {:.2f}\n", pool.get_avg_queue_size());
 
     return 0;
 }
