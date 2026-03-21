@@ -9,10 +9,14 @@
 #include <random>
 #include <format>
 #include <sstream>
+#include <atomic>
 
 using namespace std;
 
 mutex cout_mutex;
+
+atomic<long long> total_task_time_sec{ 0 };
+atomic<int> completed_tasks_count{ 0 };
 
 string get_thread_id()
 {
@@ -32,6 +36,12 @@ private:
 
 	bool stop;
     bool paused;
+
+    int active_tasks{ 0 };
+    condition_variable cv_active_tasks_finished;
+
+    atomic<long long> total_wait_time_sec{ 0 };
+    atomic<int> wait_count{ 0 };
 
     void worker_routine();
 public:
@@ -55,6 +65,41 @@ public:
         cv.notify_all();
     }
 
+    void stop_immediately()
+    {
+        {
+            unique_lock<mutex> lock(queue_mutex);
+            stop = true;
+
+            active_tasks -= tasks.size();
+
+            queue<function<void()>> empty_queue;
+            swap(tasks, empty_queue);
+        }
+
+        cv.notify_all();
+    }
+
+    size_t get_threads_count() const
+    {
+        return workers.size();
+    }
+
+    double get_avg_wait_time() const
+    {
+        if (wait_count == 0) return 0.0;
+
+        return static_cast<double>(total_wait_time_sec) / wait_count;
+    }
+
+    void wait_all()
+    {
+        unique_lock<mutex> lock(queue_mutex);
+        cv_active_tasks_finished.wait(lock, [this]() {
+            return active_tasks == 0;
+        });
+    }
+
     template<class F, class... Args> void add_task(F&& f, Args&&... args);
 };
 
@@ -67,11 +112,22 @@ void ThreadPool::worker_routine()
         {
             unique_lock<mutex> lock(queue_mutex);
 
+            auto start_wait = chrono::high_resolution_clock::now();
+
             cv.wait(lock, [this]() {
                 return stop || (!tasks.empty() && !paused);
             });
 
-			if (stop && tasks.empty())
+            auto end_wait = chrono::high_resolution_clock::now();
+            long long slept = chrono::duration_cast<chrono::seconds>(end_wait - start_wait).count();
+
+            if (slept > 0)
+            {
+                total_wait_time_sec += slept;
+                wait_count++;
+            }
+            
+            if (stop && tasks.empty())
             {
                 return;
             }
@@ -81,6 +137,16 @@ void ThreadPool::worker_routine()
         }
 
         task();
+
+        {
+            unique_lock<mutex> lock(queue_mutex);
+            active_tasks--;
+
+            if (active_tasks == 0)
+            {
+                cv_active_tasks_finished.notify_all();
+            }
+        }
     }
 }
 
@@ -123,6 +189,7 @@ template<class F, class... Args> void ThreadPool::add_task(F&& f, Args&&... args
         }
 
         tasks.push(function<void()>(task));
+        active_tasks++;
     }
 
 	cv.notify_one();
@@ -144,6 +211,9 @@ void work(int task_id)
     int sleep_time = dist(gen);
 
     this_thread::sleep_for(chrono::seconds(sleep_time));
+
+    total_task_time_sec += sleep_time;
+    completed_tasks_count++;
 
     {
         lock_guard<mutex> lock(cout_mutex);
@@ -198,6 +268,21 @@ int main()
     now = chrono::system_clock::now();
     cout << format("\n[{:%H:%M:%S}] Pool is resumed. Work is continued...\n\n", now);
     pool.resume();
+
+    pool.wait_all();
+
+    now = chrono::system_clock::now();
+    cout << format("\n[{:%H:%M:%S}] --- STATS ---\n", now);
+    cout << format("Created threads amount: {}\n", pool.get_threads_count());
+    cout << format("Average thread wait time: {:.2f} seconds\n", pool.get_avg_wait_time());
+
+    double avg_task_time = 0.0;
+    if (completed_tasks_count > 0)
+    {
+        avg_task_time = static_cast<double>(total_task_time_sec) / completed_tasks_count;
+    }
+
+    cout << format("Average task completion time: {:.2f} seconds\n", avg_task_time);
 
     return 0;
 }
