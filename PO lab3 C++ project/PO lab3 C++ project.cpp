@@ -15,7 +15,7 @@ using namespace std;
 
 mutex cout_mutex;
 
-atomic<long long> total_task_time_sec{ 0 };
+atomic<long long> total_wait_time_ms{ 0 };
 atomic<int> completed_tasks_count{ 0 };
 
 string get_thread_id()
@@ -89,7 +89,7 @@ public:
     {
         if (wait_count == 0) return 0.0;
 
-        return static_cast<double>(total_wait_time_sec) / wait_count;
+        return static_cast<double>(total_wait_time_sec) / wait_count / 1000.0;
     }
 
     void wait_all()
@@ -119,7 +119,7 @@ void ThreadPool::worker_routine()
             });
 
             auto end_wait = chrono::high_resolution_clock::now();
-            long long slept = chrono::duration_cast<chrono::seconds>(end_wait - start_wait).count();
+            long long slept = chrono::duration_cast<chrono::milliseconds>(end_wait - start_wait).count();
 
             if (slept > 0)
             {
@@ -212,7 +212,7 @@ void work(int task_id)
 
     this_thread::sleep_for(chrono::seconds(sleep_time));
 
-    total_task_time_sec += sleep_time;
+    total_wait_time_ms += sleep_time;
     completed_tasks_count++;
 
     {
@@ -279,7 +279,7 @@ int main()
     double avg_task_time = 0.0;
     if (completed_tasks_count > 0)
     {
-        avg_task_time = static_cast<double>(total_task_time_sec) / completed_tasks_count;
+        avg_task_time = static_cast<double>(total_wait_time_ms) / completed_tasks_count;
     }
 
     cout << format("Average task completion time: {:.2f} seconds\n", avg_task_time);
